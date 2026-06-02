@@ -18,10 +18,10 @@ uv sync
 
 The project pins the main experimental dependencies in `pyproject.toml`, including PyTorch, Transformers, Datasets, Evaluate, Accelerate, spaCy, NLTK, PEFT, Flair, Rouge, and scikit-learn. The spaCy English model is also installed through `uv`.
 
-Download the NLTK tokenizer data used by the preprocessing scripts:
+Download the NLTK data used by preprocessing and METEOR evaluation:
 
 ```bash
-uv run python -c "import nltk; nltk.download('punkt')"
+uv run python -c "import nltk; nltk.download('punkt'); nltk.download('wordnet'); nltk.download('omw-1.4')"
 ```
 
 For Linux/CUDA runs with Llama or Gemma 4-bit loading, `bitsandbytes` is installed automatically. It is skipped on macOS because official `bitsandbytes==0.45.0` wheels are not available for macOS arm64.
@@ -136,3 +136,70 @@ uv run ghost-train --task classification --data sst2 --model_name bert-base-unca
 Metrics are written to `results/<model-name>/..._metrics.json`, and best
 checkpoints are saved under `models/<model-name>/` unless `--no_save_model` is
 provided.
+
+## Attack and Defense Evaluation
+
+The reconstructed repo keeps the GIA implementations decoupled from the GHOST
+pipeline. Use `ghost-attack` to prepare the fixed attack subset, run an external
+attack implementation on either the original or transformed text, then score the
+recovered text against the original selected samples.
+
+Create the 64-example attack subset used in the paper:
+
+```bash
+uv run ghost-attack select \
+  --data sst2 \
+  --model_name bert-base-uncased \
+  --select_size 64
+```
+
+By default this reads the transformation output from `data/<model-name>/` and
+writes `attack_data/<model-name>/<dataset>_selected_data.json`. The selected
+file contains `original_sentences`, `transformed_sentences`, and `labels`, so
+attack code can choose whether it is evaluating the undefended baseline or the
+GHOST-transformed defense.
+
+Score outputs from LAMP, TAG, DLG, or DAGER-style logs that contain
+`Prediction:` blocks:
+
+```bash
+uv run ghost-attack score \
+  --selected_data_path attack_data/bert-base-uncased/sst2_selected_data.json \
+  --predictions_path path/to/attack_output.txt \
+  --output_path attack_results/bert-base-uncased/sst2_lamp_transformed.json \
+  --output_format prediction_blocks \
+  --batch_size 1 \
+  --defense_efficacy
+```
+
+For GRAB logs, use the GRAB parser:
+
+```bash
+uv run ghost-attack score \
+  --selected_data_path attack_data/bert-base-uncased/sst2_selected_data.json \
+  --predictions_path path/to/grab_output.txt \
+  --output_path attack_results/bert-base-uncased/sst2_grab_transformed.json \
+  --output_format grab
+```
+
+The scorer also accepts `json`, `jsonl`, and one-prediction-per-line `plain`
+formats. Output JSON contains ROUGE-1, ROUGE-2, ROUGE-L, METEOR, and optional
+`1 - metric` defense efficacy values.
+
+Run the adaptive white-box reversal baseline, where the attacker knows the
+shadow-token map and tries to map recovered shadow text back to original tokens:
+
+```bash
+uv run ghost-attack adaptive \
+  --data sst2 \
+  --model_name bert-base-uncased \
+  --selected_data_path attack_data/bert-base-uncased/sst2_selected_data.json \
+  --shadow_map_path data/bert-base-uncased/shadow_top_70_overlap_0.1.json \
+  --output_path attack_results/bert-base-uncased/sst2_adaptive_max_similarity.json \
+  --strategy max_similarity
+```
+
+Adaptive strategies are `max_similarity`, `median_similarity`, `mean_embedding`,
+and `sample`. For gated decoder models, pass `--hf_token` or set `HF_TOKEN`.
+For larger Llama/Gemma adaptive runs on Linux/CUDA, add `--device cuda:0` and
+`--load_in_4bit`.
